@@ -184,7 +184,7 @@ class Crawler:
         elif len(args) == 2:
             self.output_dir = Path(os.getcwd())
 
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+        os.makedirs(self.output_dir, exist_ok=True)
 
         self.crawled_threads = set()
         self.crawled_hashes = set()
@@ -233,7 +233,7 @@ class Crawler:
         unwanted_hashes = set()
         image_queue = set()
         _temp_dir = '.' + os.urandom(6).hex()
-        Path(os.getcwd(), _temp_dir).mkdir(parents=True, exist_ok=True)
+        os.makedirs(Path(self.output_dir, _temp_dir), exist_ok=True)
 
         while True:
             for _hash in hash_queue:
