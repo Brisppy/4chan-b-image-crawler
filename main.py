@@ -184,6 +184,8 @@ class Crawler:
         elif len(args) == 2:
             self.output_dir = Path(os.getcwd())
 
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
         self.crawled_threads = set()
         self.crawled_hashes = set()
         self.hash_queue = set()
