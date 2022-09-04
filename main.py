@@ -265,7 +265,7 @@ class Crawler:
                             and sanitize(_hash[1]) not in unwanted_hashes:
                         # get user to verify hash is wanted
                         while True:
-                            os.startfile(Path(os.getcwd(), _temp_dir, _hash[0].split('/')[-1]))
+                            os.startfile(Path(self.output_dir, _temp_dir, _hash[0].split('/')[-1]))
                             _i = input(f'Crawl hash {sanitize(_hash[1])}? Y/N : ')
                             if _i == 'Y' or _i == 'y':
                                 hash_queue.add(sanitize(_hash[1]))
@@ -274,7 +274,7 @@ class Crawler:
                             else:
                                 continue
 
-                            Path(os.getcwd(), _temp_dir, _hash[0].split('/')[-1]).unlink()
+                            Path(self.output_dir, _temp_dir, _hash[0].split('/')[-1]).unlink()
                             break
 
                 [image_queue.add(_i[0]) for _i in new_hashes if sanitize(_i[1]) not in crawled_threads
@@ -286,7 +286,7 @@ class Crawler:
             thread_queue = set()
 
             if not hash_queue and not thread_queue:
-                shutil.rmtree(Path(os.getcwd(), _temp_dir))
+                shutil.rmtree(Path(self.output_dir, _temp_dir))
                 break
 
         # download images
