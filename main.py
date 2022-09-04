@@ -51,7 +51,7 @@ class Thread:
         _processed_posts = set()
 
         def builder(pid):
-            if pid not in _processed_posts:
+            if pid not in _processed_posts and pid in self._posts.keys():
                 _processed_posts.add(pid)
                 [builder(i) for i in self._posts[pid] if i in self._posts.keys()]
 
