@@ -113,7 +113,8 @@ class Archiver:
     def get_thread_posts(url):
         _r = s.get(url, headers=h)
         if _r.status_code != 200:
-            return 0
+            print(f'ERROR: Status code {_r.status_code} received for thread.')
+            return [], []
 
         # extract posts
         _post_ids, _post_images = Archiver.extract_posts(_r.text)
@@ -202,6 +203,9 @@ class Crawler:
     def crawl_thread(self, url, ret=False):
         print(f'INFO: Fetching posts for url: {url}')
         _posts_ids, _post_images = Archiver.get_thread_posts(url)
+
+        if not _posts_ids or not _post_images:
+            return []
 
         # generate thread using parents and replies of given post
         root_post_id = url.split('#')[-1]
