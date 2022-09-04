@@ -69,13 +69,17 @@ class Archiver:
         """
         _r = s.get('https://archived.moe/b/search/image/' + i_hash, headers=h)
         if _r.status_code != 200:
-            return 0
+            return []
 
         html = BeautifulSoup(_r.text, 'html.parser')
 
-        # get result count to work out number of pages
-        _ct = int(re.match('^[0-9]*', html.find('div', id='main').h3.small.contents[0])[0])
-        _page_ct = ceil(_ct / 25)
+        try:
+            # get result count to work out number of pages
+            _ct = int(re.match('^[0-9]*', html.find('div', id='main').h3.small.contents[0])[0])
+            _page_ct = ceil(_ct / 25)
+        except AttributeError:
+            # no results found my archived.moe search
+            return []
 
         _thread_post_ids = set()
 
@@ -131,7 +135,7 @@ class Archiver:
             for chunk in _r:
                 _i.write(chunk)
 
-        return 'DEBUG: Image successfully downloaded:', url
+        return
 
     @staticmethod
     def extract_posts(html):
@@ -264,21 +268,48 @@ class Crawler:
                         _f = future.result()
 
                 # pick out hashes we actually want
+                _all = _none = False
                 for _hash in new_hashes:
                     if sanitize(_hash[1]) not in crawled_hashes and sanitize(_hash[1]) not in hash_queue \
                             and sanitize(_hash[1]) not in unwanted_hashes:
+
+                        if _none:
+                            unwanted_hashes.add(sanitize(_hash[1]))
+                            Path(self.output_dir, _temp_dir, sanitize(_hash[0].split('/')[-1])).unlink()
+                            continue
+
+                        if _all:
+                            hash_queue.add(sanitize(_hash[1]))
+                            Path(self.output_dir, _temp_dir, sanitize(_hash[0].split('/')[-1])).unlink()
+                            continue
+
                         # get user to verify hash is wanted
                         while True:
-                            os.startfile(Path(self.output_dir, _temp_dir, _hash[0].split('/')[-1]))
-                            _i = input(f'Crawl hash {sanitize(_hash[1])}? Y/N : ')
+                            try:
+                                os.startfile(Path(self.output_dir, _temp_dir, sanitize(_hash[0].split('/')[-1])))
+                            except FileNotFoundError:
+                                unwanted_hashes.add(sanitize(_hash[1]))
+                                break
+                            _i = input(f'Crawl hash {sanitize(_hash[1])}? [Y]es | [N]o | [A]ll | N[o]ne : ')
                             if _i == 'Y' or _i == 'y':
                                 hash_queue.add(sanitize(_hash[1]))
+                                Path(self.output_dir, _temp_dir, sanitize(_hash[0].split('/')[-1])).unlink()
                             elif _i == 'N' or _i == 'n':
                                 unwanted_hashes.add(sanitize(_hash[1]))
+                                Path(self.output_dir, _temp_dir, sanitize(_hash[0].split('/')[-1])).unlink()
+                            elif _i == 'O' or _i == 'o':
+                                unwanted_hashes.add(sanitize(_hash[1]))
+                                Path(self.output_dir, _temp_dir, sanitize(_hash[0].split('/')[-1])).unlink()
+                                _none = True
+                                break
+                            elif _i == 'A' or _i == 'a':
+                                _all = True
+                                hash_queue.add(sanitize(_hash[1]))
+                                Path(self.output_dir, _temp_dir, sanitize(_hash[0].split('/')[-1])).unlink()
+                                break
                             else:
                                 continue
 
-                            Path(self.output_dir, _temp_dir, _hash[0].split('/')[-1]).unlink()
                             break
 
                 [image_queue.add(_i[0]) for _i in new_hashes if sanitize(_i[1]) not in crawled_threads
