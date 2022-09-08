@@ -15,6 +15,7 @@ Optionally, a path to an output directory can also be supplied, otherwise the cu
 
 import os
 import re
+import json
 import shutil
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -243,6 +244,15 @@ class Crawler:
         _temp_dir = '.' + os.urandom(6).hex()
         os.makedirs(Path(self.output_dir, _temp_dir), exist_ok=True)
 
+        # import saved vars if they exist
+        if Path(self.output_dir, '.resume').exists():
+            with open(Path(self.output_dir, '.resume'), 'r') as _resume:
+                _vars = json.loads(_resume.read())
+                hash_queue = set(_vars[0])
+                crawled_threads = set(_vars[1])
+                unwanted_hashes = set(_vars[2])
+                image_queue = set(_vars[3])
+
         while True:
             for _hash in hash_queue:
                 print(f'INFO: Fetching threads with hash: {_hash}')
@@ -254,7 +264,6 @@ class Crawler:
 
             # wipe hash queue
             hash_queue = set()
-
             for _thread in thread_queue:
                 print(f'INFO: Crawling thread with id: {_thread}')
                 new_hashes = self.crawl_thread(f'https://thebarchive.com/b/thread/{_thread}', True)
@@ -265,7 +274,9 @@ class Crawler:
                                for _hash in new_hashes if sanitize(_hash[1]) not in crawled_hashes
                                and sanitize(_hash[1]) not in hash_queue and sanitize(_hash[1]) not in unwanted_hashes]
                     for future in as_completed(futures):
-                        _f = future.result()
+                        if _f := future.result():
+                            # remove hash if image dl failed
+                            new_hashes.remove(new_hashes[[i[0] for i in new_hashes].index(_f[1])])
 
                 # pick out hashes we actually want
                 _all = _none = False
@@ -319,6 +330,10 @@ class Crawler:
 
             # wipe thread queue
             thread_queue = set()
+
+            # output vars
+            with open(Path(self.output_dir, '.resume'), 'w') as _resume:
+                _resume.write(json.dumps([list(hash_queue), list(crawled_threads), list(unwanted_hashes), list(image_queue)]))
 
             if not hash_queue and not thread_queue:
                 shutil.rmtree(Path(self.output_dir, _temp_dir))
