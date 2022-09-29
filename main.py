@@ -1,29 +1,33 @@
-# archived moe crawler
+# 4chan (/b/) related image crawler
 
 """
-A script for downloading linked images (replies, parents) from a single thread, or downloading a given image hash,
-and any connected images based on linked images (replies, parents).
-
-
 This script allows you to supply either:
-    1. A post number, with which all linked (replied, replies) images will be downloaded.
-    2. A URL to an image hash, where each page will be crawled, and linked images downloaded. The crawler will also
-       view each new image hash and repeat the process.
+    1. An archived.moe URL to an individual post number, with which all linked (parents, replies)
+       images will be downloaded.
+    2. An archived.moe URL to an image hash, where each page will be crawled, and linked images
+       downloaded. The crawler will also view each new image hash and repeat the process until no
+       more images can be found.
+        - The user will be prompted whenever a new image hash is found to ensure only related images
+          are crawled.
 
 Optionally, a path to an output directory can also be supplied, otherwise the current directory is used.
 """
 
 import os
 import re
-import json
 import shutil
 import sys
+import pickle
+from PIL import Image
+import imagehash
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import as_completed
 from math import ceil
 from pathlib import Path
+from time import sleep
 import requests
 from bs4 import BeautifulSoup
+from collections import OrderedDict
 
 h = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
                    '(KHTML, like Gecko) Chrome/104.0.0.0 Safari/537.36'}
@@ -57,7 +61,7 @@ class Thread:
                 [builder(i) for i in self._posts[pid] if i in self._posts.keys()]
 
         builder(post_id)
-        return _processed_posts
+        return sorted(_processed_posts)
 
 
 class Archiver:
@@ -68,6 +72,8 @@ class Archiver:
         :param i_hash:
         :return: list of thread#post_ids
         """
+        print(f'INFO: Fetching threads with hash: {i_hash}')
+
         _r = s.get('https://archived.moe/b/search/image/' + i_hash, headers=h)
         if _r.status_code != 200:
             return []
@@ -84,7 +90,7 @@ class Archiver:
 
         _thread_post_ids = set()
 
-        with ThreadPoolExecutor(max_workers=5) as executor:
+        with ThreadPoolExecutor(max_workers=10) as executor:
             futures = []
             for _p in range(_page_ct):
                 if _p == 0:
@@ -98,7 +104,7 @@ class Archiver:
             for future in as_completed(futures):
                 _thread_post_ids.update(set(future.result()))
 
-        return _thread_post_ids
+        return {i_hash: {i: None for i in _thread_post_ids}}
 
     @staticmethod
     def extract_threads(url):
@@ -127,16 +133,32 @@ class Archiver:
         return _post_ids, _post_images
 
     @staticmethod
-    def get_image(url, out_dir):
-        _r = s.get(url, headers=h, stream=True)
-        if _r.status_code != 200:
-            return 'ERROR: Image failed to download:', url
+    def get_image(url, out_dir, img_name=None):
+        if not img_name:
+            img_name = url.split('/')[-1]
 
-        with open(Path(out_dir, url.split('/')[-1]), 'wb') as _i:
-            for chunk in _r:
-                _i.write(chunk)
+        Path(out_dir).mkdir(exist_ok=True, parents=True)
 
-        return
+        ct = 0
+        while ct < 5:
+            # wipe image if it already exists
+            if Path(out_dir, img_name).exists():
+                Path(out_dir, img_name).unlink()
+
+            _r = s.get(url, headers=h)
+            if _r.status_code != 200:
+                ct += 1
+                Path(out_dir, img_name).unlink()
+                print(f'ERROR: Status code {_r.status_code} received while downloading image ({url}), retrying in 15s.')
+                sleep(15)
+                continue
+
+            with open(Path(out_dir, img_name), 'wb') as _i:
+                _i.write(_r.content)
+
+            return
+
+        return 'ERROR: Image failed to download:', url
 
     @staticmethod
     def extract_posts(html):
@@ -159,7 +181,7 @@ class Archiver:
             try:
                 post_image_url = post.find('a', {'class': 'thread_image_link'})['href']
                 post_image_hash = post.find('a', {'class': 'thread_image_link'}).img['data-md5']
-                post_image = [post_image_url, post_image_hash]
+                post_image = [post_image_url, sanitize(post_image_hash)]
             except TypeError:
                 post_image = None
             linked_posts = [i['data-post'] for i in post.findAll('a', {'class': 'backlink'})]
@@ -172,7 +194,7 @@ class Archiver:
             .find('a', {'class': 'thread_image_link'})['href']
         op_image_hash = html.body.find('div', id='main').find('article', {'class': 'post_is_op'}) \
             .find('a', {'class': 'thread_image_link'}).img['data-md5']
-        op_image = [op_image_url, op_image_hash]
+        op_image = [op_image_url, sanitize(op_image_hash)]
         op_linked_posts = \
             [i['data-post'] for i in html.body.find('div', id='main').find('article', {'class': 'post_is_op'})
                 .find('div', {'class': 'backlink_list'}).findAll('a', {'class': 'backlink'})]
@@ -206,7 +228,7 @@ class Crawler:
             self.mode = None
 
     def crawl_thread(self, url, ret=False):
-        print(f'INFO: Fetching posts for url: {url}')
+        print(f'INFO: Fetching posts for url: {url.replace("thebarchive.com", "archived.moe").replace("#", "/#")}')
         _posts_ids, _post_images = Archiver.get_thread_posts(url)
 
         if not _posts_ids or not _post_images:
@@ -222,10 +244,15 @@ class Crawler:
         url_hash_list = []
         for post_id in thread:
             if _post_images[post_id]:
-                url_hash_list.append(_post_images[post_id])
+                _l = _post_images[post_id]
+                _l.append(post_id)
+                url_hash_list.append(_l)
 
         if ret:
-            return url_hash_list
+            if url_hash_list:
+                return {url.replace('https://thebarchive.com/b/thread/', ''): url_hash_list}
+            else:
+                return {url.replace('https://thebarchive.com/b/thread/', ''): None}
 
         print(f'INFO: Downloading images to {self.output_dir}')
 
@@ -235,115 +262,272 @@ class Crawler:
                 print(future.result())
 
     def crawl_hash(self, root_hash):
-        thread_queue = set()
-        crawled_threads = set()
-        hash_queue = {sanitize(root_hash)}
-        crawled_hashes = set()
-        unwanted_hashes = set()
-        image_queue = set()
+        checked_hashes = {root_hash}
+        image_phashes = set()
+        image_queue = dict()
+
+        # fetch hash of root
+        _r_threads = Archiver.get_threads_from_hash(root_hash)
+        _r_post = self.crawl_thread('https://thebarchive.com/b/thread/' + list(_r_threads[root_hash].keys())[0], True)
+
+        # find root image in thread
+        for _pid in list(_r_post.values())[0]:
+            if sanitize(_pid[1]) == sanitize(root_hash):
+                Archiver.get_image(_pid[0], self.output_dir, _pid[2] + '.jpg')
+                image_phashes.add(get_image_hash(Path(self.output_dir, _pid[2] + '.jpg')))
+                break
+
+        # queue {
+        #        hash# {
+        #               thread# {
+        #                        (image_url, image_hash)
+        queue = {root_hash: {}}
         _temp_dir = '.' + os.urandom(6).hex()
         os.makedirs(Path(self.output_dir, _temp_dir), exist_ok=True)
 
-        # import saved vars if they exist
+        # restore progress
         if Path(self.output_dir, '.resume').exists():
-            with open(Path(self.output_dir, '.resume'), 'r') as _resume:
-                _vars = json.loads(_resume.read())
-                hash_queue = set(_vars[0])
-                crawled_threads = set(_vars[1])
-                unwanted_hashes = set(_vars[2])
-                image_queue = set(_vars[3])
+            with open(Path(self.output_dir, '.resume'), 'rb') as _resume:
+                _resume_data = pickle.load(_resume)
+                checked_hashes = set(_resume_data[0])
+                image_phashes = set(_resume_data[1])
+                image_queue = dict(_resume_data[2])
+                queue = dict(_resume_data[3])
 
-        while True:
-            for _hash in hash_queue:
-                print(f'INFO: Fetching threads with hash: {_hash}')
-                new_threads = Archiver.get_threads_from_hash(_hash)
-                # append thread if id not in crawled threads
-                [thread_queue.add(_t) for _t in new_threads if _t.split('#')[0] not in crawled_threads]
+        prev_queue_len = 0
+        while prev_queue_len < len(queue):
+            # set prev queue length to check for loop end
+            prev_queue_len = len(queue)
 
-                crawled_hashes.add(_hash)
+            # perform thread discovery for new hashes
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                # create pool of hashes, only selecting queue keys without values
+                futures = []
+                for _hash in queue.keys():
+                    if not queue[_hash]:
+                        futures.append(executor.submit(Archiver.get_threads_from_hash, _hash))
 
-            # wipe hash queue
-            hash_queue = set()
-            for _thread in thread_queue:
-                print(f'INFO: Crawling thread with id: {_thread}')
-                new_hashes = self.crawl_thread(f'https://thebarchive.com/b/thread/{_thread}', True)
+                for future in as_completed(futures):
+                    if future.result():
+                        print(future.result())
+                        # update queue key with thread ids
+                        queue.update(future.result())
 
-                # download images of new hashes temporarily for user checking
-                with ThreadPoolExecutor(max_workers=10) as executor:
-                    futures = [executor.submit(Archiver.get_image, _hash[0], Path(self.output_dir, _temp_dir))
-                               for _hash in new_hashes if sanitize(_hash[1]) not in crawled_hashes
-                               and sanitize(_hash[1]) not in hash_queue and sanitize(_hash[1]) not in unwanted_hashes]
-                    for future in as_completed(futures):
-                        if _f := future.result():
-                            # remove hash if image dl failed
-                            new_hashes.remove(new_hashes[[i[0] for i in new_hashes].index(_f[1])])
-
-                # pick out hashes we actually want
-                _all = _none = False
-                for _hash in new_hashes:
-                    if sanitize(_hash[1]) not in crawled_hashes and sanitize(_hash[1]) not in hash_queue \
-                            and sanitize(_hash[1]) not in unwanted_hashes:
-
-                        if _none:
-                            unwanted_hashes.add(sanitize(_hash[1]))
-                            Path(self.output_dir, _temp_dir, sanitize(_hash[0].split('/')[-1])).unlink()
+            # discover all hashes in threads
+            futures = []
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                for _hash in queue.keys():
+                    for _thread in queue[_hash]:
+                        if queue[_hash][_thread]:
+                            # skip already processed threads
                             continue
+
+                        # build future for each thread of hash
+                        futures.append(executor.submit(self.crawl_thread, f'https://thebarchive.com/b/thread/{_thread}', True))
+
+                    # execute futures
+                    for future in as_completed(futures):
+                        if future.result() and future.result().values():
+                            # update queue with found threads
+                            queue[_hash].update(future.result())
+
+                    # add found images to global queue
+                    image_queue[_hash] = OrderedDict(sorted(queue[_hash].items(), key=lambda t: t[0]))
+
+            # create futures for multithreading downloading of images
+            futures = []
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                for _hash in image_queue.keys():
+                    for _thread in image_queue[_hash]:
+                        # catch threads without linked posts
+                        if not image_queue[_hash][_thread]:
+                            continue
+
+                        for _image_tuple in image_queue[_hash][_thread]:
+                            # skip if image already crawled
+                            if _image_tuple[1] in checked_hashes:
+                                continue
+
+                            executor.submit(Archiver.get_image, _image_tuple[0], Path(self.output_dir, _temp_dir, _thread.split('#')[0]), _image_tuple[2] + '.jpg')
+
+                # perform downloads
+                print('INFO: Downloading images...')
+                for future in as_completed(futures):
+                    if _f := future.result():
+                        continue
+                        # do something on download fail?
+
+            input('Press enter to begin hash verification.')
+            print('You can either:\n\tSelect a provided option.\n\tDelete any undesired photos, choose [Y]es or [N]o for the current photo then select the [A]ll option.')
+
+            # pick out hashes we actually want
+            for _hash in image_queue:
+                _skip_hash = False
+
+                for _thread in image_queue[_hash]:
+                    _all = False
+                    _none = False
+                    idx = 0
+
+                    print(f'Performing verification for thread https://archived.moe/b/thread/{_thread.replace("#", "/#")}.')
+
+                    # skip threads without linked posts/images
+                    if not image_queue[_hash][_thread]:
+                        idx += 1
+                        continue
+
+                    while idx < len(image_queue[_hash][_thread]):
+                        checked_hashes.add(image_queue[_hash][_thread][idx][1])
+
+                        if _skip_hash:
+                            break
+
+                        # if image deleted we skip as the user doesnt want it
+                        if not Path(self.output_dir, _temp_dir, _thread.split('#')[0], image_queue[_hash][_thread][idx][2] + '.jpg').exists():
+                            idx += 1
+                            continue
+
+                        # get image comparison hash for checking if it matches any existing image hash
+                        image_phash = get_image_hash(Path(self.output_dir, _temp_dir, _thread.split('#')[0], image_queue[_hash][_thread][idx][2] + '.jpg'))
 
                         if _all:
-                            hash_queue.add(sanitize(_hash[1]))
-                            Path(self.output_dir, _temp_dir, sanitize(_hash[0].split('/')[-1])).unlink()
+                            # skip adding to queue if image already present
+                            if sanitize(image_queue[_hash][_thread][idx][1]) in queue.keys():
+                                idx += 1
+                                continue
+
+                            queue[sanitize(image_queue[_hash][_thread][idx][1])] = None
+                            image_phashes.add(image_phash)
+                            try:
+                                shutil.move(Path(self.output_dir, _temp_dir, _thread.split('#')[0],
+                                                 image_queue[_hash][_thread][idx][2] + '.jpg'),
+                                            Path(self.output_dir, image_queue[_hash][_thread][idx][2] + '.jpg'))
+
+                            except FileNotFoundError:
+                                pass
+
+                            idx += 1
                             continue
 
+                        if _none or _skip_hash:
+                            break
+
+                        # compare against all hashes
+                        if image_phash:
+                            similarity = compare_image_against_hashlist(image_phash, image_phashes)
+                            print(f'INFO: Image similarity: {similarity}.')
+
+                            if similarity < 5:
+                                print('INFO: Image matches an already verified picture.')
+                                image_phashes.add(image_phash)
+                                if sanitize(image_queue[_hash][_thread][idx][1]) in queue.keys():
+                                    idx += 1
+                                    continue
+
+                                queue[sanitize(image_queue[_hash][_thread][idx][1])] = None
+                                try:
+                                    shutil.move(Path(self.output_dir, _temp_dir, _thread.split('#')[0],
+                                                     image_queue[_hash][_thread][idx][2] + '.jpg'),
+                                                Path(self.output_dir, image_queue[_hash][_thread][idx][2] + '.jpg'))
+                                except FileNotFoundError:
+                                    pass
+
+                                finally:
+                                    idx += 1
+                                    break
+
                         # get user to verify hash is wanted
+                        # loop in case of invalid input
                         while True:
                             try:
-                                os.startfile(Path(self.output_dir, _temp_dir, sanitize(_hash[0].split('/')[-1])))
+                                os.startfile(Path(self.output_dir, _temp_dir, _thread.split('#')[0], image_queue[_hash][_thread][idx][2] + '.jpg'))
                             except FileNotFoundError:
-                                unwanted_hashes.add(sanitize(_hash[1]))
+                                idx += 1
                                 break
-                            _i = input(f'Crawl hash {sanitize(_hash[1])}? [Y]es | [N]o | [A]ll | N[o]ne : ')
-                            if _i == 'Y' or _i == 'y':
-                                hash_queue.add(sanitize(_hash[1]))
-                                Path(self.output_dir, _temp_dir, sanitize(_hash[0].split('/')[-1])).unlink()
-                            elif _i == 'N' or _i == 'n':
-                                unwanted_hashes.add(sanitize(_hash[1]))
-                                Path(self.output_dir, _temp_dir, sanitize(_hash[0].split('/')[-1])).unlink()
-                            elif _i == 'O' or _i == 'o':
-                                unwanted_hashes.add(sanitize(_hash[1]))
-                                Path(self.output_dir, _temp_dir, sanitize(_hash[0].split('/')[-1])).unlink()
+
+                            _i = input(f'Crawl hash {sanitize(image_queue[_hash][_thread][idx][1])}? [Y]es | [N]o | [A]ll | N[o]ne | [B]ack | [S]kip Hash: ')
+                            if _i.lower() == 'y':
+                                if sanitize(image_queue[_hash][_thread][idx][1]) in queue.keys():
+                                    idx += 1
+                                    break
+                                queue[sanitize(image_queue[_hash][_thread][idx][1])] = None
+                                image_phashes.add(image_phash)
+                                try:
+                                    shutil.move(Path(self.output_dir, _temp_dir, _thread.split('#')[0], image_queue[_hash][_thread][idx][2] + '.jpg'), Path(self.output_dir, image_queue[_hash][_thread][idx][2] + '.jpg'))
+                                except FileNotFoundError:
+                                    pass
+                                finally:
+                                    idx += 1
+                                    break
+
+                            elif _i.lower() == 'n':
+                                pass
+
+                            elif _i.lower() == 'o':
                                 _none = True
-                                break
-                            elif _i == 'A' or _i == 'a':
+
+                            elif _i.lower() == 'a':
                                 _all = True
-                                hash_queue.add(sanitize(_hash[1]))
-                                Path(self.output_dir, _temp_dir, sanitize(_hash[0].split('/')[-1])).unlink()
+                                if sanitize(image_queue[_hash][_thread][idx][1]) in queue.keys():
+                                    idx += 1
+                                    break
+                                queue[sanitize(image_queue[_hash][_thread][idx][1])] = None
+                                image_phashes.add(image_phash)
+                                try:
+                                    shutil.move(Path(self.output_dir, _temp_dir, _thread.split('#')[0], image_queue[_hash][_thread][idx][2] + '.jpg'), Path(self.output_dir, image_queue[_hash][_thread][idx][2] + '.jpg'))
+                                except FileNotFoundError:
+                                    pass
+
+                            elif idx > 0 and _i.lower() == 'b':
+                                idx -= 1
                                 break
+
+                            elif _i.lower() == 's':
+                                _skip_hash = True
+                                break
+
                             else:
                                 continue
 
+                            idx += 1
                             break
 
-                [image_queue.add(_i[0]) for _i in new_hashes if sanitize(_i[1]) not in crawled_threads
-                 and sanitize(_i[1]) not in unwanted_hashes]
+                    try:
+                        shutil.rmtree(Path(self.output_dir, _temp_dir, _thread.split('#')[0]))
+                    except FileNotFoundError:
+                        pass
 
-                crawled_threads.add(_thread.split('#')[0])
+                    # save progress
+                    with open(Path(self.output_dir, '.resume'), 'wb') as _resume:
+                        pickle.dump([checked_hashes, image_phashes, image_queue, queue], _resume)
+                        #_resume.write(json.dumps([checked_hashes, image_phashes, image_queue, queue]))
 
-            # wipe thread queue
-            thread_queue = set()
+            # wipe image queue before processing new hashes
+            image_queue = dict()
 
-            # output vars
-            with open(Path(self.output_dir, '.resume'), 'w') as _resume:
-                _resume.write(json.dumps([list(hash_queue), list(crawled_threads), list(unwanted_hashes), list(image_queue)]))
 
-            if not hash_queue and not thread_queue:
-                shutil.rmtree(Path(self.output_dir, _temp_dir))
-                break
+def get_image_hash(image):
+    try:
+        _hash = imagehash.phash(Image.open(image))
+    except FileNotFoundError:
+        return
+    return _hash
 
-        # download images
-        with ThreadPoolExecutor(max_workers=10) as executor:
-            futures = [executor.submit(Archiver.get_image, image, self.output_dir) for image in image_queue]
-            for future in as_completed(futures):
-                print(future.result())
+
+def compare_image_against_hashlist(image_hash, hash_list, cutoff=5):
+    """Compares an image against a provided list of hashes.
+
+    :param image_hash: image to compare
+    :param hash_list: set of images to compare image_phash against
+    :param cutoff: number of dissimilar bits
+    :returns: True if any image in the given set has n < cutoff number of different bets
+    """
+    similarity = set()
+
+    for _hash in hash_list:
+        similarity.add(image_hash - _hash)
+
+    return min(similarity)
 
 
 if __name__ == '__main__':
@@ -358,7 +542,7 @@ if __name__ == '__main__':
         c.crawl_thread(sys.argv[1])
 
     elif c.mode == 'hash':
-        c.crawl_hash(sys.argv[1].split("/")[-2].replace('==', '') + '==')
+        c.crawl_hash(sanitize(sys.argv[1].split("/")[-2].replace('==', '') + '=='))
 
     else:
         print('ERROR: Invalid url supplied.')
