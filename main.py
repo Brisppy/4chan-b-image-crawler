@@ -124,7 +124,7 @@ class Archiver:
     def get_thread_posts(url):
         _r = s.get(url, headers=h)
         if _r.status_code != 200:
-            print(f'ERROR: Status code {_r.status_code} received for thread.')
+            print(f'ERROR: Status code {_r.status_code} received for thread: {url}.')
             return [], []
 
         # extract posts
@@ -259,7 +259,8 @@ class Crawler:
         with ThreadPoolExecutor(max_workers=10) as executor:
             futures = [executor.submit(Archiver.get_image, image[0], self.output_dir) for image in url_hash_list]
             for future in as_completed(futures):
-                print(future.result())
+                # print(future.result())
+                pass
 
     def crawl_hash(self, root_hash):
         checked_hashes = {root_hash}
@@ -270,12 +271,17 @@ class Crawler:
         _r_threads = Archiver.get_threads_from_hash(root_hash)
         _r_post = self.crawl_thread('https://thebarchive.com/b/thread/' + list(_r_threads[root_hash].keys())[0], True)
 
-        # find root image in thread
-        for _pid in list(_r_post.values())[0]:
-            if sanitize(_pid[1]) == sanitize(root_hash):
-                Archiver.get_image(_pid[0], self.output_dir, _pid[2] + '.jpg')
-                image_phashes.add(get_image_hash(Path(self.output_dir, _pid[2] + '.jpg')))
-                break
+        if _r_post:
+            # find root image in thread
+            for _pid in list(_r_post.values())[0]:
+                if sanitize(_pid[1]) == sanitize(root_hash):
+                    extension = '.' + _pid[0].split('.')[-1]
+                    Archiver.get_image(_pid[0], self.output_dir, _pid[2] + extension)
+                    image_phashes.add(get_image_hash(Path(self.output_dir, _pid[2] + extension)))
+                    break
+
+        else:
+            print('ERROR: Root image hash could not be found.')
 
         # queue {
         #        hash# {
@@ -348,7 +354,8 @@ class Crawler:
                             if _image_tuple[1] in checked_hashes:
                                 continue
 
-                            executor.submit(Archiver.get_image, _image_tuple[0], Path(self.output_dir, _temp_dir, _thread.split('#')[0]), _image_tuple[2] + '.jpg')
+                            extension = '.' + _image_tuple[0].split('.')[-1]
+                            executor.submit(Archiver.get_image, _image_tuple[0], Path(self.output_dir, _temp_dir, _thread.split('#')[0]), _image_tuple[2] + extension)
 
                 # perform downloads
                 print('INFO: Downloading images...')
@@ -369,12 +376,12 @@ class Crawler:
                     _none = False
                     idx = 0
 
-                    print(f'Performing verification for thread https://archived.moe/b/thread/{_thread.replace("#", "/#")}.')
-
                     # skip threads without linked posts/images
                     if not image_queue[_hash][_thread]:
                         idx += 1
                         continue
+
+                    print(f'Performing verification for thread https://archived.moe/b/thread/{_thread.replace("#", "/#")}.')
 
                     while idx < len(image_queue[_hash][_thread]):
                         checked_hashes.add(image_queue[_hash][_thread][idx][1])
@@ -383,12 +390,15 @@ class Crawler:
                             break
 
                         # if image deleted we skip as the user doesnt want it
-                        if not Path(self.output_dir, _temp_dir, _thread.split('#')[0], image_queue[_hash][_thread][idx][2] + '.jpg').exists():
+                        extension = '.' + image_queue[_hash][_thread][idx][0].split('.')[-1]
+                        if not Path(self.output_dir, _temp_dir, _thread.split('#')[0], image_queue[_hash][_thread][idx][2] + extension).exists():
                             idx += 1
                             continue
 
                         # get image comparison hash for checking if it matches any existing image hash
-                        image_phash = get_image_hash(Path(self.output_dir, _temp_dir, _thread.split('#')[0], image_queue[_hash][_thread][idx][2] + '.jpg'))
+                        image_phash = None
+                        if 'jpg' in extension or 'png' in extension:
+                            image_phash = get_image_hash(Path(self.output_dir, _temp_dir, _thread.split('#')[0], image_queue[_hash][_thread][idx][2] + extension))
 
                         if _all:
                             # skip adding to queue if image already present
@@ -397,11 +407,12 @@ class Crawler:
                                 continue
 
                             queue[sanitize(image_queue[_hash][_thread][idx][1])] = None
-                            image_phashes.add(image_phash)
+                            if image_phash:
+                                image_phashes.add(image_phash)
                             try:
                                 shutil.move(Path(self.output_dir, _temp_dir, _thread.split('#')[0],
-                                                 image_queue[_hash][_thread][idx][2] + '.jpg'),
-                                            Path(self.output_dir, image_queue[_hash][_thread][idx][2] + '.jpg'))
+                                                 image_queue[_hash][_thread][idx][2] + extension),
+                                            Path(self.output_dir, image_queue[_hash][_thread][idx][2] + extension))
 
                             except FileNotFoundError:
                                 pass
@@ -415,7 +426,7 @@ class Crawler:
                         # compare against all hashes
                         if image_phash:
                             similarity = compare_image_against_hashlist(image_phash, image_phashes)
-                            print(f'INFO: Image similarity: {similarity}.')
+                            # print(f'INFO: Image similarity: {similarity}.')
 
                             if similarity < 5:
                                 print('INFO: Image matches an already verified picture.')
@@ -427,8 +438,8 @@ class Crawler:
                                 queue[sanitize(image_queue[_hash][_thread][idx][1])] = None
                                 try:
                                     shutil.move(Path(self.output_dir, _temp_dir, _thread.split('#')[0],
-                                                     image_queue[_hash][_thread][idx][2] + '.jpg'),
-                                                Path(self.output_dir, image_queue[_hash][_thread][idx][2] + '.jpg'))
+                                                     image_queue[_hash][_thread][idx][2] + extension),
+                                                Path(self.output_dir, image_queue[_hash][_thread][idx][2] + extension))
                                 except FileNotFoundError:
                                     pass
 
@@ -440,7 +451,7 @@ class Crawler:
                         # loop in case of invalid input
                         while True:
                             try:
-                                os.startfile(Path(self.output_dir, _temp_dir, _thread.split('#')[0], image_queue[_hash][_thread][idx][2] + '.jpg'))
+                                os.startfile(Path(self.output_dir, _temp_dir, _thread.split('#')[0], image_queue[_hash][_thread][idx][2] + extension))
                             except FileNotFoundError:
                                 idx += 1
                                 break
@@ -451,9 +462,10 @@ class Crawler:
                                     idx += 1
                                     break
                                 queue[sanitize(image_queue[_hash][_thread][idx][1])] = None
-                                image_phashes.add(image_phash)
+                                if image_phash:
+                                    image_phashes.add(image_phash)
                                 try:
-                                    shutil.move(Path(self.output_dir, _temp_dir, _thread.split('#')[0], image_queue[_hash][_thread][idx][2] + '.jpg'), Path(self.output_dir, image_queue[_hash][_thread][idx][2] + '.jpg'))
+                                    shutil.move(Path(self.output_dir, _temp_dir, _thread.split('#')[0], image_queue[_hash][_thread][idx][2] + extension), Path(self.output_dir, image_queue[_hash][_thread][idx][2] + extension))
                                 except FileNotFoundError:
                                     pass
                                 finally:
@@ -472,9 +484,10 @@ class Crawler:
                                     idx += 1
                                     break
                                 queue[sanitize(image_queue[_hash][_thread][idx][1])] = None
-                                image_phashes.add(image_phash)
+                                if image_phash:
+                                    image_phashes.add(image_phash)
                                 try:
-                                    shutil.move(Path(self.output_dir, _temp_dir, _thread.split('#')[0], image_queue[_hash][_thread][idx][2] + '.jpg'), Path(self.output_dir, image_queue[_hash][_thread][idx][2] + '.jpg'))
+                                    shutil.move(Path(self.output_dir, _temp_dir, _thread.split('#')[0], image_queue[_hash][_thread][idx][2] + extension), Path(self.output_dir, image_queue[_hash][_thread][idx][2] + extension))
                                 except FileNotFoundError:
                                     pass
 
