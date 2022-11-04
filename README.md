@@ -22,10 +22,10 @@ Optionally, a path to an output directory can also be supplied, otherwise the cu
 Requirements:
     bs4
     requests
-    ImageHash
+    imagehash
     opencv-python
 
-# python3 -m pip install bs4 requests ImageHash opencv-python
+# python3 -m pip install bs4 requests imagehash opencv-python
 
 Changelog:
 (29-09-22)
