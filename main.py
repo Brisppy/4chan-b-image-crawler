@@ -74,9 +74,23 @@ class Archiver:
         """
         print(f'INFO: Fetching threads with hash: {i_hash}')
 
-        _r = s.get('https://archived.moe/b/search/image/' + i_hash, headers=h, timeout=30)
-        if _r.status_code != 200:
-            return []
+        for attempt in range(6):
+            try:
+                if attempt > 4:
+                    print(f'ERROR: Maximum attempts reached for hash {i_hash}')
+                    return []
+
+                _r = s.get('https://archived.moe/b/search/image/' + i_hash, headers=h, timeout=30)
+
+                if _r.status_code != 200:
+                    print(f'ERROR: Status code {_r.status_code} received for hash {i_hash}.')
+                    sleep(15)
+                    continue
+
+                break
+
+            except requests.exceptions.ReadTimeout:
+                pass
 
         html = BeautifulSoup(_r.text, 'html.parser')
 
@@ -90,7 +104,7 @@ class Archiver:
 
         _thread_post_ids = set()
 
-        with ThreadPoolExecutor(max_workers=10) as executor:
+        with ThreadPoolExecutor(max_workers=3) as executor:
             futures = []
             for _p in range(_page_ct):
                 if _p == 0:
@@ -108,24 +122,43 @@ class Archiver:
 
     @staticmethod
     def extract_threads(url):
-        _r = s.get(url, headers=h, timeout=30)
-        if _r.status_code != 200:
-            return 0
+        _thread_post_ids = None
 
-        html = BeautifulSoup(_r.text, 'html.parser')
+        for attempt in range(6):
+            if attempt > 4:
+                print(f'ERROR: Maximum attempts reached for {url}')
+                return []
 
-        _t = html.body.find('div', id='main').find('aside', {'class': 'posts'}).findAll('article')
-        _thread_post_ids = [''.join(t.header.find('div', {'class': 'post_data'})
-                                    .find('a', {'data-function': 'highlight'})['href'].split('/')[-2:]) for t in _t]
+            _r = s.get(url, headers=h, timeout=30)
+            if _r.status_code != 200:
+                print(f'ERROR: Status code {_r.status_code} received for {url}')
+                sleep(15)
+                continue
+
+            html = BeautifulSoup(_r.text, 'html.parser')
+
+            _t = html.body.find('div', id='main').find('aside', {'class': 'posts'}).findAll('article')
+            _thread_post_ids = [''.join(t.header.find('div', {'class': 'post_data'})
+                                        .find('a', {'data-function': 'highlight'})['href'].split('/')[-2:]) for t in _t]
+            break
 
         return _thread_post_ids
 
     @staticmethod
     def get_thread_posts(url):
-        _r = s.get(url, headers=h, timeout=30)
-        if _r.status_code != 200:
-            print(f'ERROR: Status code {_r.status_code} received for thread: {url}.')
-            return [], []
+        for attempt in range(6):
+            if attempt > 4:
+                print(f'ERROR: Maximum attempts reached for {url}')
+                return [], []
+
+            _r = s.get(url, headers=h, timeout=30)
+
+            if _r.status_code != 200:
+                print(f'ERROR: Status code {_r.status_code} received for thread {url}.')
+                sleep(15)
+                continue
+
+            break
 
         # extract posts
         _post_ids, _post_images = Archiver.extract_posts(_r.text)
@@ -139,26 +172,27 @@ class Archiver:
 
         Path(out_dir).mkdir(exist_ok=True, parents=True)
 
-        ct = 0
-        while ct < 5:
+        for attempt in range(6):
+            if attempt > 4:
+                print(f'ERROR: Maximum attempts reached for image {url}')
+                return url
+
             # wipe image if it already exists
             if Path(out_dir, img_name).exists():
                 Path(out_dir, img_name).unlink()
 
             _r = s.get(url, headers=h, timeout=30)
             if _r.status_code != 200:
-                ct += 1
-                Path(out_dir, img_name).unlink()
-                print(f'ERROR: Status code {_r.status_code} received while downloading image ({url}), retrying in 15s.')
+                print(f'ERROR: Status code {_r.status_code} received for image ({url}), retrying in 15s.')
                 sleep(15)
                 continue
 
-            with open(Path(out_dir, img_name), 'wb') as _i:
-                _i.write(_r.content)
+            break
 
-            return
+        with open(Path(out_dir, img_name), 'wb') as _i:
+            _i.write(_r.content)
 
-        return 'ERROR: Image failed to download:', url
+        return
 
     @staticmethod
     def extract_posts(html):
@@ -256,7 +290,7 @@ class Crawler:
 
         print(f'INFO: Downloading images to {self.output_dir}')
 
-        with ThreadPoolExecutor(max_workers=10) as executor:
+        with ThreadPoolExecutor(max_workers=3) as executor:
             futures = [executor.submit(Archiver.get_image, image[0], self.output_dir) for image in url_hash_list]
             for future in as_completed(futures):
                 # print(future.result())
@@ -308,7 +342,7 @@ class Crawler:
             prev_queue_len = len(queue)
 
             # perform thread discovery for new hashes
-            with ThreadPoolExecutor(max_workers=10) as executor:
+            with ThreadPoolExecutor(max_workers=3) as executor:
                 # create pool of hashes, only selecting queue keys without values
                 futures = []
                 for _hash in queue.keys():
@@ -324,7 +358,7 @@ class Crawler:
             # discover all hashes in threads
             crawled = set()
             futures = []
-            with ThreadPoolExecutor(max_workers=10) as executor:
+            with ThreadPoolExecutor(max_workers=3) as executor:
                 for _hash in queue.keys():
                     # skip hashes not archived by thebarchive / archivedmoe
                     if not queue[_hash]:
@@ -350,7 +384,7 @@ class Crawler:
 
             # create futures for multithreading downloading of images
             futures = []
-            with ThreadPoolExecutor(max_workers=10) as executor:
+            with ThreadPoolExecutor(max_workers=3) as executor:
                 for _hash in image_queue.keys():
                     for _thread in image_queue[_hash]:
                         # catch threads without linked posts
@@ -362,13 +396,22 @@ class Crawler:
                             if _image_tuple[1] in checked_hashes:
                                 continue
 
-                            extension = '.' + _image_tuple[0].split('.')[-1]
+                            try:
+                                extension = '.' + _image_tuple[0].split('.')[-1]
+                                # skip if image file already exists
+                                if Path(Path(self.output_dir, _temp_dir, _thread.split('#')[0]), _image_tuple[2] + extension).exists():
+                                    continue
+
+                            except PermissionError:
+                                continue
+
                             executor.submit(Archiver.get_image, _image_tuple[0], Path(self.output_dir, _temp_dir, _thread.split('#')[0]), _image_tuple[2] + extension)
 
                 # perform downloads
                 print('INFO: Downloading images...')
                 for future in as_completed(futures):
-                    if _f := future.result():
+                    if future.result():
+                        print(future.result())
                         continue
                         # do something on download fail?
 
@@ -395,7 +438,7 @@ class Crawler:
                     if not Path(self.output_dir, _temp_dir, _thread.split('#')[0]).exists():
                         continue
 
-                    print(f'Performing verification for thread https://archived.moe/b/thread/{_thread.replace("#", "/#")}')
+                    print(f'Performing verification for thread https://thebarchive.com/b/thread/{_thread.replace("#", "/#")}')
 
                     while idx < len(image_queue[_hash][_thread]):
                         checked_hashes.add(image_queue[_hash][_thread][idx][1])
@@ -475,7 +518,7 @@ class Crawler:
                                 sleep(1)
                                 continue
 
-                            _i = input(f'Crawl hash {sanitize(image_queue[_hash][_thread][idx][1])}? [Y]es | [N]o | [A]ll | N[o]ne | [B]ack | [S]kip Hash: ')
+                            _i = input(f'{idx}/{len(image_queue[_hash][_thread])} Crawl hash {sanitize(image_queue[_hash][_thread][idx][1])}? [Y]es | [N]o | [A]ll | N[o]ne | [B]ack | [S]kip Hash: ')
                             if _i.lower() == 'y':
                                 if sanitize(image_queue[_hash][_thread][idx][1]) in queue.keys():
                                     idx += 1
